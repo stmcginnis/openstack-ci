@@ -130,7 +130,8 @@ class Executor(Thread):
             return
 
         # Upload necessary files to test host
-        outfile = open('./scripts/local.conf', 'a')
+        local_conf = './scripts/%slocal.conf' % name
+        outfile = open(local_conf, 'a')
         for line in fileinput.FileInput('./scripts/local.conf.template'):
             if 'CINDER_BRANCH' in line:
                 line = 'CINDER_BRANCH=%s\n' % (self.patchset_ref)
@@ -140,9 +141,9 @@ class Executor(Thread):
             outfile.write(line)
         outfile.close()
 
-        scp.put('./scripts/local.conf', '~/devstack/local.conf')
+        scp.put(local_conf, '~/devstack/local.conf')
         scp.put('./scripts/gather_logs.sh', '~/')
-        os.remove('./scripts/local.conf')
+        os.remove(local_conf)
 
         # Disable selinux enforcement to make sure no conflicts
         stdin, stdout, stderr = \
