@@ -6,6 +6,7 @@ import logging
 from optparse import OptionParser
 import os
 import paramiko
+import subprocess
 import sys
 from threading import Thread
 import time
@@ -24,11 +25,11 @@ KEY_NAME = os.environ.get('DEFAULT_OS_KEYFILE', './jenkins_key')
 def _filter_events(event):
 
     if (event.get('type', 'nill') == 'comment-added' and
-        'Verified+1' in event['comment'] and
-        event['change']['project'] in PROJECT):
+            'Verified+1' in event['comment'] and
+            event['change']['project'] in PROJECT):
         if event['author']['username'] == 'jenkins':
             logging.info('Adding review id %s to job queue...',
-                   event['change']['number'])
+                         event['change']['number'])
             return event
         else:
             logging.debug('Not doing anything with %s %s event.',
@@ -40,7 +41,7 @@ def _filter_events(event):
 
 class JobThread(Thread):
     """ Thread to process the gerrit events. """
-    
+
     def _publish_results_to_gerrit(self, event, result):
         pass
 
@@ -72,14 +73,19 @@ class JobThread(Thread):
                 commit_id = ''
                 commands = ''
                 for test in tests:
-                    status_lines = '\n%s' % test.get_results()
+                    if test.get_results() is None:
+                        logging.info('No result for %s', test.get_name())
+                        continue
+                    status_lines += '\n%s' % test.get_results()
                     success = success and test.test_passed()
                     commit_id = test.get_commit_id()
                     commands += 'tar zxvf %s.tgz\n' % test.get_name()
                     commands += 'scp -r %s 192.168.100.22:/var/http/oslogs/\n' % \
-                                 test.get_name()
-                    commands += 'rm -fr %s\n' % test.get_name()
+                        test.get_name()
+                    commands += 'rm -fr %s*\n' % test.get_name()
 
+                if commands == '':
+                    continue
                 commands += "ssh -p 29418 -i gerrit_key dell-storagecenter-ci@"
                 commands += "review.openstack.org gerrit review -m '\"\n"
 
@@ -90,6 +96,17 @@ class JobThread(Thread):
 
                 commands += "\"' %s\n" % commit_id
                 logging.info('Commands:\n%s\n', commands)
+                # Uncomment to enable automatic failure reporting
+                # if not success:
+                #     commands = commands.replace('ssh', '# ssh')
+
+                # if success:
+                returncode = subprocess.call(
+                    commands,
+                    shell=True,
+                    stdout=open('/dev/null', 'w'),
+                    stderr=subprocess.STDOUT)
+                logging.info('Command execution returned %d', returncode)
 
 
 class GerritEventStream(object):
@@ -100,10 +117,11 @@ class GerritEventStream(object):
         self.host = OS_REVIEW_HOST
         self.port = OS_REVIEW_HOST_PORT
         logging.info('Connecting to gerrit stream with %s@%s:%d '
-               'using keyfile %s', self.username,
-                                   self.host,
-                                   self.port,
-                                   self.key_file)
+                     'using keyfile %s',
+                     self.username,
+                     self.host,
+                     self.port,
+                     self.key_file)
 
         self.ssh = paramiko.SSHClient()
         self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -125,8 +143,8 @@ class GerritEventStream(object):
     def next(self):
         return self.stdout.readline()
 
+
 def process_options():
-    config = {}
     usage = "usage: %prog [options]\nos_ci.py."
     parser = OptionParser(usage, version='%prog 0.1')
 
@@ -141,6 +159,7 @@ def process_options():
     (options, args) = parser.parse_args()
     return options
 
+
 if __name__ == '__main__':
     global config
     json_data = open('ci.config')
@@ -151,9 +170,10 @@ if __name__ == '__main__':
     event_queue = deque()
     options = process_options()
 
-    logging.basicConfig(format='%(asctime)s %(thread)d %(levelname)s: %(message)s',
-                        level=logging.DEBUG,
-                        filename='/home/smcginnis/ci.log')
+    logging.basicConfig(
+        format='%(asctime)s %(thread)d %(levelname)s: %(message)s',
+        level=logging.DEBUG,
+        filename='/home/smcginnis/ci.log')
     logging.getLogger('paramiko').setLevel(logging.WARNING)
     logging.getLogger('requests').setLevel(logging.WARNING)
 
