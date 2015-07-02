@@ -10,6 +10,7 @@ LOGFILE=$DEST/logs/stack.sh.log
 LOGDAYS=2
 LOG_COLOR=False
 RECLONE=yes
+ENABLED_SERVICES=c-api,c-sch,c-vol,cinder,dstat,g-api,g-reg,key,mysql,n-api,n-cond,n-cpu,n-crt,n-net,n-obj,n-sch,rabbit,tempest
 CINDER_BRANCH=master
 CINDER_ENABLED_BACKENDS=eqlx
 CINDER_DEFAULT_VOLUME_TYPE=eqlx
@@ -25,15 +26,11 @@ TEMPEST_VOLUME_VENDOR="Dell"
 TEMPEST_STORAGE_PROTOCOL=iSCSI
 Q_USE_SECGROUP=False
 LIBVIRT_FIREWALL_DRIVER=nova.virt.firewall.NoopFirewallDriver
+ACTIVE_TIMEOUT=120
+BOOT_TIMEOUT=120
+ASSOCIATE_TIMEOUT=120
+TERMINATE_TIMEOUT=120
+
 
 [[post-config|$CINDER_CONF]]
 [DEFAULT]
-[eqlx]
-volume_driver=cinder.volume.drivers.eqlx.DellEQLSanISCSIDriver
-volume_backend_name=eqlx
-san_ip=10.12.16.14
-san_login=grpadmin
-san_password=eql
-san_thin_provision=false
-eqlx_group_name=GSTORE
-eqlx_cli_timeout=120

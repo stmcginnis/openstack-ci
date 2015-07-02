@@ -1,11 +1,27 @@
 #!/usr/bin/python
 
+# Copyright 2015 Sean McGinnis
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#  http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from collections import deque
+from email.mime import text
 import json
 import logging
 from optparse import OptionParser
 import os
 import paramiko
+import smtplib
 import subprocess
 import sys
 from threading import Thread
@@ -22,21 +38,32 @@ PROJECT = os.environ.get('CI_PROJECT', 'openstack/cinder')
 KEY_NAME = os.environ.get('DEFAULT_OS_KEYFILE', './jenkins_key')
 
 
-def _filter_events(event):
+def _send_email(host, to, subject, body):
+    msg = text.MIMEText(body)
+    msg['Subject'] = subject
+    msg['From'] = to
+    msg['To'] = msg['From']
+    mail = smtplib.SMTP(host)
+    try:
+        mail.sendmail(msg['To'], msg['From'], msg.as_string())
+    except:
+        logging.exception('Failed to send email notice.')
+    mail.quit()
 
-    if (event.get('type', 'nill') == 'comment-added' and
-            'Verified+1' in event['comment'] and
-            event['change']['project'] in PROJECT):
-        if event['author']['username'] == 'jenkins':
-            logging.info('Adding review id %s to job queue...',
-                         event['change']['number'])
-            return event
-        else:
-            logging.debug('Not doing anything with %s %s event.',
-                          event['change']['project'],
-                          event['change']['number'])
-    else:
-        return None
+
+def _filter_events(event):
+    try:
+        if (event.get('type', 'nill') == 'comment-added' and
+                event['change']['project'] in PROJECT):
+            if ((event['author'].get('username', '') == 'jenkins' and
+                 'Verified+1' in event['comment']) or
+                    'check dell' in event['comment']):
+                logging.info('Adding review id %s to job queue...',
+                             event['change']['number'])
+                return event
+    except KeyError:
+        logging.exception('Something wrong in event data. %s', event)
+    return None
 
 
 class JobThread(Thread):
@@ -50,7 +77,7 @@ class JobThread(Thread):
         global config
         while True:
             if not event_queue:
-                time.sleep(60)
+                time.sleep(20)
             else:
                 event = event_queue.popleft()
                 # Launch test runs
@@ -80,13 +107,14 @@ class JobThread(Thread):
                     success = success and test.test_passed()
                     commit_id = test.get_commit_id()
                     commands += 'tar zxvf %s.tgz\n' % test.get_name()
-                    commands += 'scp -r %s 192.168.100.22:/var/http/oslogs/\n' % \
-                        test.get_name()
+                    commands += (
+                        'scp -r %s 192.168.100.22:/var/http/oslogs/\n' %
+                        test.get_name())
                     commands += 'rm -fr %s*\n' % test.get_name()
 
                 if commands == '':
                     continue
-                commands += "ssh -p 29418 -i gerrit_key dell-storagecenter-ci@"
+                commands += "ssh -p 29418 -i gerrit_key my-ci@"
                 commands += "review.openstack.org gerrit review -m '\"\n"
 
                 if success:
@@ -96,9 +124,12 @@ class JobThread(Thread):
 
                 commands += "\"' %s\n" % commit_id
                 logging.info('Commands:\n%s\n', commands)
-                # Uncomment to enable automatic failure reporting
-                # if not success:
-                #     commands = commands.replace('ssh', '# ssh')
+                if not success and config.get('smtp-host'):
+                    _send_email(config['smtp-host'],
+                                config.get('smtp-to',
+                                           'me@example.com'),
+                                'CI Test Failure',
+                                commands)
 
                 # if success:
                 returncode = subprocess.call(
@@ -107,6 +138,9 @@ class JobThread(Thread):
                     stdout=open('/dev/null', 'w'),
                     stderr=subprocess.STDOUT)
                 logging.info('Command execution returned %d', returncode)
+
+                # Throttle things a little but
+                time.sleep(5)
 
 
 class GerritEventStream(object):
@@ -134,8 +168,8 @@ class GerritEventStream(object):
             logging.critical('Failed to connect to gerrit stream: %s', e)
             sys.exit(1)
 
-        self.stdin, self.stdout, self.stderr =\
-            self.ssh.exec_command("gerrit stream-events")
+        self.stdin, self.stdout, self.stderr = self.ssh.exec_command(
+            "gerrit stream-events")
 
     def __iter__(self):
         return self
@@ -159,7 +193,6 @@ def process_options():
     (options, args) = parser.parse_args()
     return options
 
-
 if __name__ == '__main__':
     global config
     json_data = open('ci.config')
@@ -182,16 +215,47 @@ if __name__ == '__main__':
         jobThread.daemon = True
         jobThread.start()
 
+    retries = 0
     while True:
         events = GerritEventStream(config['gerrit-id'])
+
         try:
+            # event = json.loads(
+            #     '{"patchSet": { "ref": '
+            #     '"refs/changes/95/176095/1", "number": "1" '
+            #     '}, "change": { "number": "176095" } }')
+            # event_queue.append(event)
             for event in events:
                 event = json.loads(event)
                 valid_event = _filter_events(event)
                 if valid_event:
+                    retries = 0
+                    try:
+                        match = [src for src in event_queue if src['patchSet']['ref'] == event['patchSet']['ref']]
+                        if match:
+                            event_queue.remove(match[0])
+                            logging.debug('Removed event')
+                    except Exception, ValueError:
+                        pass
                     if not options.event_monitor_only:
-                        logging.debug("Adding event to queue...")
                         event_queue.append(valid_event)
         except KeyboardInterrupt:
             print('Got keyboard interrupt.')
             sys.exit()
+        except Exception as e:
+            if retries < 30:
+                logging.exception(
+                    'Error in event processing, attempting to reinitialize...')
+                retries = retries + 1
+                time.sleep(min(300, 30 * retries))
+            else:
+                logging.exception(
+                    'Hit max retry attempts. Have a nice day.')
+                if config.get('smtp-host'):
+                    _send_email(config['smtp-host'],
+                                config.get('smtp-to',
+                                           'openstack-cinder-sc-ci@dell.com'),
+                                'CI Connection Failure',
+                                'The CI system has exceeded the max number of '
+                                'connection retries and is exiting.')
+                sys.exit()
