@@ -1,4 +1,4 @@
-# Copyright 2015 Sean McGinnis
+# Copyright 2016 Sean McGinnis
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@ from pyVmomi import vim
 
 import instance
 
+LOCK = threading.Lock()
+
 
 class VMWInstance(instance.Instance):
     """Class to handle VM instance management."""
@@ -26,13 +28,13 @@ class VMWInstance(instance.Instance):
     def __init__(self, name, test_config):
         self.host = test_config.get('test-host')
         self.user = test_config.get('os-user') or 'root'
-        self.password = test_config.get('os-pass') or 'Equallogic1'
+        self.password = test_config.get('os-pass') or 'secret'
         self.image_id = test_config['image-id']
         self.port = int(test_config.get('os-port') or '443')
+        self.lock = LOCK
 
         try:
             self.instance = self._boot_instance(name)
-            # print('Instance set to %s' % self.instance)
         except Exception as e:
             raise instance.InstanceBuildException(
                 'Failed to create instance: %s' % e)
@@ -45,6 +47,7 @@ class VMWInstance(instance.Instance):
         return service_instance
 
     def _boot_instance(self, name):
+        self.lock.acquire()
         esx = self._get_esx_connection()
         content = esx.RetrieveContent()
         children = content.rootFolder.childEntity
@@ -63,10 +66,10 @@ class VMWInstance(instance.Instance):
         if vm is None:
             raise Exception('VM not found.')
 
-        for i in range(1, 200):
+        for i in range(1, 340):
             if (vm.runtime.powerState !=
                     vim.VirtualMachinePowerState.poweredOff):
-                if i < 200:
+                if i < 340:
                     # VM is in use, wait for it to become avilable
                     time.sleep(15)
                 else:
@@ -128,3 +131,4 @@ class VMWInstance(instance.Instance):
         time.sleep(20)
         vm.RevertToCurrentSnapshot()
         connect.Disconnect(esx)
+        self.lock.release()

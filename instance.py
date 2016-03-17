@@ -1,4 +1,4 @@
-# Copyright 2015 Sean McGinnis
+# Copyright 2016 Sean McGinnis
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -67,4 +67,5 @@ class Instance(object):
         return self.instance.status
 
     def delete_instance(self):
-        self.instance = self.nova_client.servers.delete(self.instance.id)
+        if self.instance:
+            self.instance = self.nova_client.servers.delete(self.instance.id)

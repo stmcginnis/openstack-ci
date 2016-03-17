@@ -1,4 +1,4 @@
-# Copyright 2015 Sean McGinnis
+# Copyright 2016 Sean McGinnis
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,12 +34,14 @@ def wait_for_completion(session, err_session, return_output=False):
     session.setblocking(0)
     output = ''
     start = datetime.now().replace(microsecond=0)
+    timeout = time.time() + 60 * 45 # 45 min timeout
     session_closed = False
     while True:
         if session.recv_ready():
             data = session.recv(4096)
             if not data:
                 # Closed connection?
+                logging.debug('Session closed!')
                 session_closed = True
             if return_output:
                 output += data
@@ -51,10 +53,12 @@ def wait_for_completion(session, err_session, return_output=False):
             if return_output:
                 output += data
 
-        if session_closed or session.exit_status_ready():
+        if (session_closed or session.exit_status_ready() or
+                time.time() > timeout):
             exit_code = -1 if session_closed else session.recv_exit_status()
             end = datetime.now().replace(microsecond=0)
             return exit_code, output, (end-start)
+        time.sleep(0.01)
 
 
 class Executor(Thread):
@@ -63,11 +67,12 @@ class Executor(Thread):
     Performs the actual setup and run of the CI tempest tests.
     """
 
-    def __init__(self, conf, event):
+    def __init__(self, conf, event, dependencies):
         """Constructor.
 
-        @param conf The configuration settings.
-        @param event The gerrit event.
+        :param conf: The configuration settings.
+        :param event: The gerrit event.
+        :param dependencies: Any cross-repo dependencies.
         """
         Thread.__init__(self)
         self.patchset_ref = event['patchSet']['ref']
@@ -79,6 +84,8 @@ class Executor(Thread):
         self.results = None
         self.passed = False
         self.commit_id = None
+        self.dependencies = dependencies
+        self.concurrency = conf.get('test-concurrency', 1)
         logging.debug('Instantiated test execution %s', self.name)
 
     def get_name(self):
@@ -110,23 +117,26 @@ class Executor(Thread):
 
         Executes the tests.
         """
-        try:
-            self.run_test()
-        except Exception as e:
-            logging.error('Test execution failed: %s', e)
-
-    def run_test(self):
-        """The test run."""
         name = self.name
-        # Launch a test instance
         if self.conf.get('test-platform') == 'vmware':
             instance = VMWInstance(name, self.conf)
         else:
             instance = Instance(name, self.conf)
         instance.wait_for_ready()
+        try:
+            self.run_test(instance)
+        except Exception:
+            logging.exception('Test execution failed:')
+
+        if instance:
+            instance.delete_instance()
+
+    def run_test(self, instance):
+        """The test run."""
+        name = self.name
         ip = instance.get_instance_ip()
 
-        logging.info('[%s] Starting CI test execution...', name)
+        logging.info('Starting CI test execution...')
         ssh_client = paramiko.SSHClient()
         ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         connected = False
@@ -136,18 +146,17 @@ class Executor(Thread):
                     ip,
                     username=self.conf.get('image-user') or 'ubuntu',
                     key_filename='./jenkins_key')
-                logging.debug('[%s] Connected to %s', name, ip)
+                logging.debug('Connected to %s', ip)
                 connected = True
                 break
             except:
-                logging.debug('[%s] Waiting to connect to instance %s...',
-                              name, ip)
+                logging.debug('Waiting to connect to instance %s...', ip)
                 time.sleep(10 * i)
         if connected:
             scp = SCPClient(ssh_client.get_transport())
         else:
-            logging.warning('[%s] Timed out waiting for SSH connection '
-                            'to instance.', name)
+            logging.warning('Timed out waiting for SSH connection '
+                            'to instance.')
             instance.delete_instance()
             return
 
@@ -157,6 +166,16 @@ class Executor(Thread):
         for line in fileinput.FileInput('./scripts/local.conf.template'):
             if 'CINDER_BRANCH' in line:
                 line = 'CINDER_BRANCH=%s\n' % (self.patchset_ref)
+                # Handle any cross-repo dependencies here
+                for dep in self.dependencies:
+                    project = dep.get('change', {}).get('project', '')
+                    cross_rep = ("%s_BRANCH=%s" % (
+                                 project.replace('openstack/', '').upper(),
+                                 project.get('patchSet', {}).get('ref')))
+                    if cross_rep.startswith("_BRANCH") or cross_rep.endswith(
+                            '='):
+                        continue
+                    line = "%s%s\n" % (line, cross_rep)
             if 'TEMPEST_STORAGE_PROTOCOL' in line:
                 line = 'TEMPEST_STORAGE_PROTOCOL=%s\n' % (
                     self.conf.get('test-type', 'iSCSI'))
@@ -176,7 +195,7 @@ class Executor(Thread):
         # Disable selinux enforcement to make sure no conflicts
         stdin, stdout, stderr = ssh_client.exec_command('sudo setenforce 0')
 
-        logging.debug('[%s] Stacking...', name)
+        logging.debug('Stacking...')
         # Make sure no leftover config
         stdin, stdout, stderr = ssh_client.exec_command(
             'rm -f /etc/cinder/cinder.conf')
@@ -186,12 +205,10 @@ class Executor(Thread):
                 '/tmp/stack.sh.log 2>&1')
         exit_code, output, timespan = wait_for_completion(stdout.channel,
                                                           stderr.channel)
-        logging.debug('[%s] Stacking operation took %s', name, timespan)
+        logging.debug('Stacking operation took %s', timespan)
         if exit_code != 0:
-            logging.warning('[%s] Stacking returned %d, failing run.',
-                            self.name,
+            logging.warning('Stacking returned %d, failing run.',
                             exit_code)
-            instance.delete_instance()
             return
 
         # Get the commit ID for later
@@ -203,22 +220,28 @@ class Executor(Thread):
                                                           True)
 
         if exit_code != 0:
-            logging.warning('[%s] Unable to extract commit id!', self.name)
+            logging.warning('Unable to extract commit id!')
         else:
             self.commit_id = output.rstrip('\r\n').strip()
 
-        # Perform the actual tests
-        logging.debug('[%s] Running tempest...', name)
+        # Seeing some dnsmasq weirdness, block it
         stdin, stdout, stderr = ssh_client.exec_command(
-            "cd /opt/stack/tempest && tox -e all -- --concurrency=1 "
+            'sudo ebtables -I INPUT -i eth0 '
+            '--protocol ipv4 --ip-proto udp '
+            '--ip-dport 67:68 -j DROP')
+
+        # Perform the actual tests
+        logging.debug('Running tempest...')
+        stdin, stdout, stderr = ssh_client.exec_command(
+            "cd /opt/stack/tempest && tox -e all -- --concurrency=%d "
             "'^(?=.*volume)(?!.*test_encrypted_cinder_volumes).*' > "
-            "console.log.out 2>&1")
+            "console.log.out 2>&1" % self.concurrency)
         exit_code, output, timespan = wait_for_completion(stdout.channel,
                                                           stderr.channel)
-        logging.info('[%s] Tempest test run took %s', name, timespan)
+        logging.info('Tempest test run took %s', timespan)
         if exit_code != 0:
-            logging.warning('[%s] Tempest test returned %d. Bummer.',
-                            self.name, exit_code)
+            logging.warning('Tempest test returned %d. Bummer.',
+                            exit_code)
             self._set_results(False)
         else:
             self._set_results(True)
@@ -230,11 +253,9 @@ class Executor(Thread):
         exit_code, output, timespan = wait_for_completion(stdout.channel,
                                                           stderr.channel)
 
-        logging.debug('[%s] Collecting logs...', self.name)
+        logging.debug('Collecting logs...')
         stdin, stdout, stderr = ssh_client.exec_command(
             'bash ~/gather_logs.sh %s' % name)
         exit_code, output, timespan = wait_for_completion(stdout.channel,
                                                           stderr.channel)
         scp.get('~/%s.tar.gz' % name, './%s.tgz' % self.name)
-
-        instance.delete_instance()
