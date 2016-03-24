@@ -279,7 +279,6 @@ if __name__ == '__main__':
     global process_events
     event_queue = deque()
     process_events = True
-    options = process_options()
 
     formatter = logging.Formatter(
         fmt='%(asctime)s %(levelname)-5s [%(threadName)-23s]: %(message)s',
@@ -336,8 +335,7 @@ if __name__ == '__main__':
                             logging.debug('Removed event')
                     except Exception, ValueError:
                         pass
-                    if not options.event_monitor_only:
-                        event_queue.append(valid_event)
+                    event_queue.append(valid_event)
                     logging.info('%d events in queue.', len(event_queue))
         except KeyboardInterrupt:
             print('Got keyboard interrupt.')
