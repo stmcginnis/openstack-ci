@@ -211,9 +211,9 @@ class Executor(Thread):
             outfile.write('%s\n' % line)
         outfile.close()
 
-        scp_put('./scripts/%slocal.conf' % name, '~/devstack/local.conf')
-        scp_put('./scripts/gather_logs.sh', '~/')
-        scp_put('./scripts/subunit2html.py', '/opt/stack/tempest/')
+        scp_put(scp, './scripts/%slocal.conf' % name, '~/devstack/local.conf')
+        scp_put(scp, './scripts/gather_logs.sh', '~/')
+        scp_put(scp, './scripts/subunit2html.py', '/opt/stack/tempest/')
         os.remove('./scripts/%slocal.conf' % name)
 
         # Disable selinux enforcement to make sure no conflicts
@@ -234,7 +234,7 @@ class Executor(Thread):
             logging.warning('Stacking returned %d, failing run.',
                             exit_code)
             try:
-                scp.get('/tmp/stack.sh.log', './%stack.log' % name)
+                scp.get('/tmp/stack.sh.log', './%sstack.log' % name)
             except:
                 pass
             return
