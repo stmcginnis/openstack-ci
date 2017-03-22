@@ -31,7 +31,7 @@ class Instance(object):
         self.os_user = test_config.get('os-user') or 'admin'
         self.os_pass = test_config.get('os-pass') or 'cinder'
         self.os_tenant_id = test_config.get('os-tenant') or 'admin'
-        self.os_auth_url = 'http://%s:5000/v2.0' % test_config['test-host']
+        self.os_auth_url = 'http://%s:5000/v3' % test_config['test-host']
         self.default_flavor = test_config.get('os-flavor') or 4
         self.key_name = 'jenkins'
         self.image_id = test_config['image-id']
