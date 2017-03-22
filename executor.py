@@ -89,6 +89,7 @@ class Executor(Thread):
         """
         Thread.__init__(self)
         self.patchset_ref = event['patchSet']['ref']
+        self.change_number = event['change']['number']
         self.name = '%s-%s-%s' % (
             conf['test-name'],
             event['change']['number'],
@@ -157,6 +158,7 @@ class Executor(Thread):
         ssh_client = paramiko.SSHClient()
         ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         connected = False
+        time.sleep(15)
         for i in range(1, 10):
             try:
                 ssh_client.connect(
