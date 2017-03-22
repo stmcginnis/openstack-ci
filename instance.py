@@ -14,7 +14,9 @@
 
 import time
 
-from novaclient.v1_1 import client as novaclient
+from keystoneauth1 import loading
+from keystoneauth1 import session
+from novaclient import client as novaclient
 
 
 class InstanceBuildException(Exception):
@@ -33,10 +35,18 @@ class Instance(object):
         self.default_flavor = test_config.get('os-flavor') or 4
         self.key_name = 'jenkins'
         self.image_id = test_config['image-id']
-        self.nova_client = novaclient.Client(self.os_user,
-                                             self.os_pass,
-                                             self.os_tenant_id,
-                                             self.os_auth_url)
+
+        loader = loading.get_plugin_loader('password')
+        auth = loader.load_from_options(
+            auth_url=self.os_auth_url,
+            username=self.os_user,
+            password=self.os_pass,
+            project_name=self.os_tenant_id,
+            user_domain_name='default',
+            project_domain_name='default')
+        sess = session.Session(auth=auth)
+        self.nova_client = novaclient.Client('2', session=sess)
+
         try:
             self.instance = self._boot_instance(name)
         except Exception as e:
@@ -49,9 +59,20 @@ class Instance(object):
                                                key_name=self.key_name)
 
     def get_instance_ip(self):
-        ips = self.instance.networks['private']
+        ips = self.instance.networks['provider']
         ip = ips[1] if len(ips) > 1 else ips[0]
+
         return ip
+
+    def add_iscsi_net(self):
+        # See if a storage network needs to be added
+        try:
+            iscsi_net = self.nova_client.networks.find(label='iscsi')
+            self.instance.interface_attach(None, iscsi_net.id, None)
+            return True
+        except Exception as e:
+            print("Error %s" % e)
+        return False
 
     def wait_for_ready(self, timeout=90):
         while timeout > 0:

@@ -16,13 +16,17 @@ from datetime import datetime
 import fileinput
 import logging
 import os
-import paramiko
-from scp import SCPClient
 from threading import Thread
 import time
 
+import paramiko
+from retrying import retry
+from scp import SCPClient
+
 from instance import Instance
 from vmwinstance import VMWInstance
+
+TIMEOUT_DURATION = (60 * 120)
 
 
 def wait_for_completion(session, err_session, return_output=False):
@@ -34,7 +38,7 @@ def wait_for_completion(session, err_session, return_output=False):
     session.setblocking(0)
     output = ''
     start = datetime.now().replace(microsecond=0)
-    timeout = time.time() + 60 * 45 # 45 min timeout
+    timeout = time.time() + TIMEOUT_DURATION
     session_closed = False
     while True:
         if session.recv_ready():
@@ -53,12 +57,21 @@ def wait_for_completion(session, err_session, return_output=False):
             if return_output:
                 output += data
 
-        if (session_closed or session.exit_status_ready() or
-                time.time() > timeout):
-            exit_code = -1 if session_closed else session.recv_exit_status()
+        if (time.time() > timeout or session_closed or
+                session.exit_status_ready()):
+            exit_code = (
+                session.recv_exit_status() if session.exit_status_ready()
+                else -1)
             end = datetime.now().replace(microsecond=0)
             return exit_code, output, (end-start)
-        time.sleep(0.01)
+        time.sleep(0.05)
+
+
+@retry(wait_exponential_multiplier=1000,
+       wait_exponential_max=10000,
+       stop_max_delay=30000)
+def scp_put(scp, from_path, to_path):
+    scp.put(from_path, to_path)
 
 
 class Executor(Thread):
@@ -94,6 +107,9 @@ class Executor(Thread):
     def get_commit_id(self):
         return self.commit_id
 
+    def get_change_id(self):
+        return self.change_number
+
     def test_passed(self):
         return self.passed
 
@@ -118,7 +134,8 @@ class Executor(Thread):
         Executes the tests.
         """
         name = self.name
-        if self.conf.get('test-platform') == 'vmware':
+        vmw_platform = self.conf.get('test-platform') == 'vmware'
+        if vmw_platform:
             instance = VMWInstance(name, self.conf)
         else:
             instance = Instance(name, self.conf)
@@ -151,7 +168,7 @@ class Executor(Thread):
                 break
             except:
                 logging.debug('Waiting to connect to instance %s...', ip)
-                time.sleep(10 * i)
+                time.sleep(15 * i)
         if connected:
             scp = SCPClient(ssh_client.get_transport())
         else:
@@ -163,7 +180,14 @@ class Executor(Thread):
         # Upload necessary files to test host
         ipoct = ip.split('.')
         outfile = open('./scripts/%slocal.conf' % name, 'a')
-        for line in fileinput.FileInput('./scripts/local.conf.template'):
+        input_filename = './scripts/local.conf.template'
+        custom_file = './scripts/%s-%slocal.conf.template' % (
+            self.conf['test-name'],
+            self.change_number)
+        if os.path.exists(custom_file):
+            input_filename = custom_file
+
+        for line in fileinput.FileInput(input_filename):
             if 'CINDER_BRANCH' in line:
                 line = 'CINDER_BRANCH=%s\n' % (self.patchset_ref)
                 # Handle any cross-repo dependencies here
@@ -187,9 +211,9 @@ class Executor(Thread):
             outfile.write('%s\n' % line)
         outfile.close()
 
-        scp.put('./scripts/%slocal.conf' % name, '~/devstack/local.conf')
-        scp.put('./scripts/gather_logs.sh', '~/')
-        scp.put('./scripts/subunit2html.py', '/opt/stack/tempest/')
+        scp_put('./scripts/%slocal.conf' % name, '~/devstack/local.conf')
+        scp_put('./scripts/gather_logs.sh', '~/')
+        scp_put('./scripts/subunit2html.py', '/opt/stack/tempest/')
         os.remove('./scripts/%slocal.conf' % name)
 
         # Disable selinux enforcement to make sure no conflicts
@@ -209,6 +233,10 @@ class Executor(Thread):
         if exit_code != 0:
             logging.warning('Stacking returned %d, failing run.',
                             exit_code)
+            try:
+                scp.get('/tmp/stack.sh.log', './%stack.log' % name)
+            except:
+                pass
             return
 
         # Get the commit ID for later
@@ -233,8 +261,10 @@ class Executor(Thread):
         # Perform the actual tests
         logging.debug('Running tempest...')
         stdin, stdout, stderr = ssh_client.exec_command(
-            "cd /opt/stack/tempest && tox -e all -- --concurrency=%d "
-            "'^(?=.*volume)(?!.*test_encrypted_cinder_volumes).*' > "
+            "cd /opt/stack/tempest && "
+            "tox -e all -- "
+            "'^(?=.*volume)(?!.*test_encrypted_cinder_volumes)"
+            "/*' --concurrency=%d > "
             "console.log.out 2>&1" % self.concurrency)
         exit_code, output, timespan = wait_for_completion(stdout.channel,
                                                           stderr.channel)

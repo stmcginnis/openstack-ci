@@ -17,19 +17,21 @@
 import atexit
 from collections import deque
 from email.mime import text
-import json
 import logging
-from optparse import OptionParser
+from logging import handlers as logging_handlers
 import os
-import paramiko
-import pickle
 import random
 import re
-import smtplib
 import subprocess
 import sys
 from threading import Thread
 import time
+
+import json
+import paramiko
+import pickle
+import requests
+import smtplib
 
 from executor import Executor
 
@@ -81,11 +83,17 @@ def shutdown_handler():
     logging.info('CI processing stopping.')
     process_events = False
 
+    # Write out events in case we need to kill things before
+    # they can finish up
+    pickle.dump(event_queue, open(SAVED_QUEUE_NAME, 'w'))
+
     if worker_threads:
-        timeout = 40 * 60 # wait 40 minutes
+        timeout = 40 * 60  # wait 40 minutes
         for worker in worker_threads:
             worker.join(timeout)
 
+    # Now write it out again in case more events were received
+    # in between
     pickle.dump(event_queue, open(SAVED_QUEUE_NAME, 'w'))
 
     time.sleep(3)
@@ -109,7 +117,7 @@ class JobThread(Thread):
             commit_id = test.get_commit_id()
             commands += 'tar zxvf %s.tgz\n' % test.get_name()
             commands += ('scp -r %s 192.168.100.22:/var/http/oslogs/\n' %
-                test.get_name())
+                         test.get_name())
             commands += 'rm -fr %s*\n' % test.get_name()
 
         if commands == '':
@@ -126,8 +134,10 @@ class JobThread(Thread):
         logging.info('Commands:\n%s\n', commands)
         if not success and config.get('smtp-host'):
             txt = commands[commands.find('Build'):]
-            txt = '%s\nJob ID: %s\n%d events in queue.' % (
-                txt, job_id, len(event_queue))
+            txt = ('%s\nReview: https://review.openstack.org/#/c/%s/'
+                   '\n\nJob ID: %s\n%d events in queue.' % (
+                       txt, tests[0].get_change_id(),
+                       job_id, len(event_queue)))
             _send_email(config['smtp-host'],
                         config.get('smtp-to',
                                    'openstack-ci@example.com'),
@@ -147,8 +157,6 @@ class JobThread(Thread):
         global process_events
 
         self.job_count = 0
-
-        time.sleep(random.randint(0, 10))
 
         while not event_queue:
             time.sleep(4)
@@ -269,6 +277,28 @@ class GerritEventStream(object):
         return self.stdout.readline()
 
 
+def config_logging():
+    """Sets up logging settings."""
+    formatter = logging.Formatter(
+        fmt='%(asctime)s %(levelname)-5s [%(threadName)-23s]: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S')
+
+    rotating_handler = logging_handlers.RotatingFileHandler(
+        '/home/smcginnis/ci.log', maxBytes=(1024 * 1024), backupCount=5)
+    rotating_handler.setFormatter(formatter)
+    root_logger = logging.getLogger()
+    root_logger.addHandler(rotating_handler)
+    root_logger.setLevel(logging.DEBUG)
+    logging.getLogger('paramiko').setLevel(logging.WARNING)
+    logging.getLogger('requests').setLevel(logging.WARNING)
+    logging.getLogger('keystoneauth').setLevel(logging.WARNING)
+    logging.getLogger('stevedore').setLevel(logging.WARNING)
+    logging.getLogger('novaclient').setLevel(logging.WARNING)
+
+    # Disable SSL warnings
+    requests.packages.urllib3.disable_warnings()
+
+
 if __name__ == '__main__':
     global config
     json_data = open('ci.config')
@@ -280,17 +310,7 @@ if __name__ == '__main__':
     event_queue = deque()
     process_events = True
 
-    formatter = logging.Formatter(
-        fmt='%(asctime)s %(levelname)-5s [%(threadName)-23s]: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S')
-    rotating_handler = logging.handlers.RotatingFileHandler(
-        '~/ci.log', maxBytes=(1024 * 1024), backupCount=5)
-    rotating_handler.setFormatter(formatter)
-    root_logger = logging.getLogger()
-    root_logger.addHandler(rotating_handler)
-    root_logger.setLevel(logging.DEBUG)
-    logging.getLogger('paramiko').setLevel(logging.WARNING)
-    logging.getLogger('requests').setLevel(logging.WARNING)
+    config_logging()
 
     global worker_threads
     worker_threads = []
@@ -300,6 +320,10 @@ if __name__ == '__main__':
         jobThread = JobThread()
         jobThread.daemon = True
         jobThread.name = "Worker-%s" % i
+
+        # Stagger worker start
+        time.sleep(random.randint(5, 10) * i)
+
         jobThread.start()
         worker_threads.append(jobThread)
 

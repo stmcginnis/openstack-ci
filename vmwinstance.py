@@ -99,36 +99,40 @@ class VMWInstance(instance.Instance):
 
     def delete_instance(self):
         # print('Shutting down')
-        esx = self._get_esx_connection()
-        content = esx.RetrieveContent()
-        children = content.rootFolder.childEntity
-        for child in children:
-            if hasattr(child, 'vmFolder'):
-                datacenter = child
-            else:
-                # Some other non-datacenter type
-                continue
-        vm = self.instance
-        for virtual_machine in datacenter.vmFolder.childEntity:
-            if virtual_machine.summary.config.name == self.image_id:
-                vm = virtual_machine
-                break
+        try:
+            esx = self._get_esx_connection()
+            content = esx.RetrieveContent()
+            children = content.rootFolder.childEntity
+            for child in children:
+                if hasattr(child, 'vmFolder'):
+                    datacenter = child
+                else:
+                    # Some other non-datacenter type
+                    continue
+            vm = self.instance
+            for virtual_machine in datacenter.vmFolder.childEntity:
+                if virtual_machine.summary.config.name == self.image_id:
+                    vm = virtual_machine
+                    break
 
-        if vm is None:
-            raise Exception('VM not found.')
+            if vm is None:
+                raise Exception('VM not found.')
 
-        if vm.runtime.powerState != vim.VirtualMachinePowerState.poweredOn:
-            return
+            if vm.runtime.powerState != vim.VirtualMachinePowerState.poweredOn:
+                return
 
-        task = vm.PowerOff()
-        while task.info.state not in [vim.TaskInfo.State.success,
-                                      vim.TaskInfo.State.error]:
-            time.sleep(1)
+            task = vm.PowerOff()
+            while task.info.state not in [vim.TaskInfo.State.success,
+                                          vim.TaskInfo.State.error]:
+                time.sleep(1)
 
-        if task.info.state == vim.TaskInfo.State.error:
-            raise Exception('Failed to power off VM')
+            if task.info.state == vim.TaskInfo.State.error:
+                raise Exception('Failed to power off VM')
 
-        time.sleep(20)
-        vm.RevertToCurrentSnapshot()
-        connect.Disconnect(esx)
+            time.sleep(20)
+            vm.RevertToCurrentSnapshot()
+            connect.Disconnect(esx)
+
+        except Exception:
+            raise
         self.lock.release()
